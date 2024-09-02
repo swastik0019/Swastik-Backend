@@ -356,7 +356,7 @@ exports.signUpAdmin = asyncHandler(async (req, res) => {
             });
         }
 
-        if (response.otp !== otp) {
+        if (response.otp != otp) {
             return res.status(401).json({
                 message: "Invalid OTP",
                 success: false

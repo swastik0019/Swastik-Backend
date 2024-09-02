@@ -107,24 +107,24 @@ const NODE_ENV = "production";
 
 
 // Serve frontend
-if (NODE_ENV === "production") {
-    app.use(express.static(path.join(__dirname, "../frontend/dist")));
+// if (NODE_ENV === "production") {
+//     app.use(express.static(path.join(__dirname, "../frontend/dist")));
   
-    app.get("*", (req, res) =>
-        res.sendFile(
-            path.resolve(__dirname, "../", "frontend", "dist", "index.html")
-        )
-    );
-} else {
-    app.get("/", (req, res) => res.send("Please set to production"));
-}
+//     app.get("*", (req, res) =>
+//         res.sendFile(
+//             path.resolve(__dirname, "../", "frontend", "dist", "index.html")
+//         )
+//     );
+// } else {
+//     app.get("/", (req, res) => res.send("Please set to production"));
+// }
 
-app.use("*", (req, res, next) => {
-    app.use("*", (req, res, next) => {
-    throw new Error("Not found");
-});
+// app.use("*", (req, res, next) => {
+//     app.use("*", (req, res, next) => {
+//     throw new Error("Not found");
+// });
     
-});
+// });
 
 // Creating server
 const server = http.createServer(app);
