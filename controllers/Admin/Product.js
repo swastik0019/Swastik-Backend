@@ -37,9 +37,15 @@ exports.createProduct = asyncHandler(async (req, res) => {
     // }
 
     // Parse specifications from JSON strings to objects
-    if (specifications && Array.isArray(specifications)) {
-        specifications = specifications.map(spec => JSON.parse(spec));
+    if (typeof specifications === 'string') {
+        specifications = JSON.parse(specifications);
+    } else if (Array.isArray(specifications)) {
+        specifications = specifications.map(spec => 
+            typeof spec === 'string' ? JSON.parse(spec) : spec
+        );
     }
+    
+
 
 
     // Get images from request files
