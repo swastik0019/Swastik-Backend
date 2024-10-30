@@ -1,162 +1,139 @@
-    const asyncHandler = require("../../middlewares/asyncHandler");
-    const Order = require("../../models/Order");
-    const Cart = require("../../models/Cart");
-    const Customer = require("../../models/Customer");
-    const Payment = require("../../models/Payment"); // Import the Payment model
-    const mailSender = require("../../utils/mailSender");
-    const { orderPlacedEmail } = require("../../mailTemplate/OrderPlaced");
-    const crypto = require("crypto")
-    const axios = require("axios");
+const Razorpay = require('razorpay');
+const asyncHandler = require("../../middlewares/asyncHandler");
+const Order = require("../../models/Order");
+const Cart = require("../../models/Cart");
+const Customer = require("../../models/Customer");
+const Payment = require("../../models/Payment");
+const mailSender = require("../../utils/mailSender");
+const { orderPlacedEmail } = require("../../mailTemplate/OrderPlaced");
+const crypto = require("crypto");
+
+const razorpay = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET
+});
 
 
-    function generateTransactionID() {
-        const timestamp = Date.now();
-        const randomNum = Math.floor(Math.random() * 1000000 );
-        const merchantPrefix = 'T';
-        const transactionID = `${merchantPrefix}${timestamp}${randomNum}`
-        return transactionID
+exports.processPayment = asyncHandler(async (req, res) => {
+    const { user, amount, items, deliveryAddress } = req.body.data;
+
+    const options = {
+        amount: amount * 100,
+        currency: "INR",
+        receipt: `receipt_${Date.now()}`,
+        payment_capture: 1
+    };
+
+    try {
+        const response = await razorpay.orders.create(options);
+
+        const customer = await Customer.findOne({ _id: user._id });
+
+        const payment = new Payment({
+            customer: user._id,
+            orderId: response.id,
+            amount: amount,
+            currency: "INR",
+            items,
+            status: "created",
+            deliveryAddress
+        });
+        await payment.save();
+
+        customer.payments.push(payment._id);
+        await customer.save();
+
+        return res.status(200).json({
+            id: response.id,
+            currency: response.currency,
+            amount: response.amount,
+            key: process.env.RAZORPAY_KEY_ID
+        });
+    } catch (error) {
+        console.error('Error:', error);
+        return res.status(400).json({
+            error: 'An error occurred while creating the order'
+        });
     }
+});
+
+exports.createPaymentLink = asyncHandler(async (req, res) => {
+    const { amount, currency, description } = req.body;
+
+    const options = {
+        amount: amount * 100,
+        currency: currency,
+        accept_partial: false,
+        first_min_partial_amount: 0,
+        description: description,
+    };
+
+    try {
+        const response = await razorpay.paymentLink.create(options);
+        return res.status(200).json({
+            success: true,
+            paymentLink: response.short_url // Link to generate a QR code
+        });
+    } catch (error) {
+        console.error('Error creating payment link:', error);
+        return res.status(400).json({
+            success: false,
+            message: 'Failed to create payment link'
+        });
+    }
+});
 
 
-    exports.processPayment = asyncHandler(async (req, res) => {
+exports.checkPaymentStatus = asyncHandler(async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
-        const { user, amount , items , deliveryAddress} = req.body.data;
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
 
-        const transactionId = generateTransactionID();
-        const data = {
-            merchantId: process.env.PHONEPE_MERCHANT_ID,
-            merchantTransactionId: transactionId ,
-            merchantUserId: process.env.PHONEPE_MERCHANT_ID,
-            name: user?.firstName,
-            amount: amount * 100, // Ensure amount is multiplied correctly
-            redirectUrl: `https://moseta.in/api/v1/backend/check-payment-status/${transactionId}`,
-            redirectMode: 'POST',
-            paymentInstrument: {
-                type: 'PAY_PAGE'
-            }
-        };
-        
-        const payload = JSON.stringify(data);
-        const payloadMain = Buffer.from(payload).toString('base64');
-        const key = process.env.PHONEPE_KEY;
-        const keyIndex = process.env.PHONEPE_KEY_INDEX;
-        const string = payloadMain + '/pg/v1/pay' + key;
-        const sha256 = crypto.createHash('sha256').update(string).digest('hex');
-        const checksum = sha256 + "###" + keyIndex;
-        
-        const URL = "https://api.phonepe.com/apis/hermes/pg/v1/pay"; // Updated URL with the correct endpoint
-        
-        const options = {
-            method: "POST",
-            url: URL,
-            headers: {
-                Accept: 'application/json',
-                'Content-Type': 'application/json',
-                'X-VERIFY': checksum 
+    const expectedSignature = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(body.toString())
+        .digest("hex");
+
+    const isAuthentic = expectedSignature === razorpay_signature;
+
+    if (isAuthentic) {
+        const payment = await Payment.findOne({ orderId: razorpay_order_id });
+        const customer = await Customer.findOne({ _id: payment.customer });
+        const cart = await Cart.findOne({ _id: customer.cart });
+
+        payment.status = "captured";
+        payment.paymentId = razorpay_payment_id;
+        payment.signature = razorpay_signature;
+
+        await payment.save();
+
+        // Create new order
+        const order = new Order({
+            customer: payment.customer,
+            orderItems: payment.items,
+            paymentInfo: {
+                id: payment._id,
+                status: payment.status
             },
-            data: {
-                request: payloadMain
-            }
-        };
+            totalPrice: payment.amount,
+            paidAt: new Date(),
+            shippingAddress: payment.deliveryAddress,
+            paymentStatus: "paid",
+            orderStatus: "processing"
+        });
+        await order.save();
 
+        customer.orders.push(order._id);
+        await customer.save();
 
+        // Clear cart
+        cart.items = [];
+        await cart.save();
 
+        // Send order confirmation email
         try {
-            const response = await axios.request(options);
-
-            const customer = await Customer.findOne({_id: user._id});
-
-            // Save payment details in the Payment model
-            const payment = new Payment({
-                customer: user._id,
-                orderId: response.data.data.merchantTransactionId,
-                amount: amount,
-                currency: "INR",
-                items,
-                status: "created",
-                deliveryAddress
-            });
-            await payment.save();
-
-            customer.payments.push(payment._id);
-            await customer.save();
-            
-            return res.status(200).send(response.data.data.instrumentResponse.redirectInfo.url);
-        } catch (error) {
-            console.error('Error:', error.response ? error.response.data : error.message);
-            return res.status(400).send({
-                error: error.response ? error.response.data : 'An error occurred'
-            });
-        }
-
-    });
-
-
-
-
-    exports.checkPaymentStatus = asyncHandler(async (req, res) => {
-
-        const merchantTransctionId = res.req.body.transactionId;
-        const merchantId = res.req.body.merchantId;
-        const keyIndex = process.env.PHONEPE_KEY_INDEX;
-        const key = process.env.PHONEPE_KEY ;
-        const string = `/pg/v1/status/${merchantId}/${merchantTransctionId}` + key;
-        const sha256 = crypto.createHash('sha256').update(string).digest('hex');
-        const checksum = sha256 + "###" + keyIndex;
-
-        const URL = `https://api.phonepe.com/apis/hermes/pg/v1/status/${merchantId}/${merchantTransctionId}`;
-
-        const options = {
-            method: "GET",
-            url: URL,
-            headers: {
-                accept: 'application/json',
-                'Content-Type': 'application/json',
-                'X-VERIFY': checksum,
-                'X-MERCHANT-ID' : merchantId
-            }
-        }
-
-
-        // check payment status
-        axios.request(options).then(async (response) => {
-
-            const payment = await Payment.findOne({orderId: merchantTransctionId});
-            const customer = await Customer.findOne({_id: payment.customer});
-            const cart = await Cart.findOne({_id: customer.cart})
-
-            payment.status = "captured";
-
-            await payment.save();
-            
-            // Create new order
-            const order = new Order({
-                customer: payment.customer,
-                orderItems: payment.items,
-                paymentInfo: {
-                    id: payment._id,
-                    status: payment.status
-                },
-                totalPrice: payment.amount,
-                paidAt: new Date(),
-                shippingAddress: payment.deliveryAddress,
-                paymentStatus: "paid",
-                orderStatus: "processing"
-            });
-            await order.save();
-            
-            customer.orders.push(order._id);
-            await customer.save();
-
-            // Clear cart
-            cart.items = [];
-            await cart.save();
-
-
-        // send complaint registration email
-        try{
             await mailSender(
-                customer.email , 
+                customer.email,
                 "Order Placed",
                 orderPlacedEmail(
                     customer.firstName,
@@ -165,52 +142,52 @@
                     payment.amount,
                     order.orderId
                 )
-            )
+            );
+        } catch (error) {
+            console.error('Error sending email:', error);
         }
-        catch(error){
-            throw Error(error);
-        }
 
-            const url = '/payment-success'
-            return res.redirect(url)
-        })
-        .catch((error) => {
-            console.log(error)
-            const url = '/payment-failure'
-            return res.redirect(url)
-        })
-
-    });
+        return res.status(200).json({
+            message: "Payment successful",
+            success: true
+        });
+    } else {
+        return res.status(400).json({
+            message: "Payment verification failed",
+            success: false
+        });
+    }
+});
 
 
 
-exports.cashOnDelivery = asyncHandler( async (req,res) => {
+exports.cashOnDelivery = asyncHandler(async (req, res) => {
 
-    const {amount,items,deliveryAddress} = req.body;
+    const { amount, items, deliveryAddress } = req.body;
 
-    if(!amount){
+    if (!amount) {
         return res.status(401).json({
             message: "Please select amount.",
             success: false
         })
     }
 
-    if(!items){
+    if (!items) {
         return res.status(401).json({
             message: "Please select order items.",
             success: false
         })
     }
 
-    if(!deliveryAddress){
+    if (!deliveryAddress) {
         return res.status(401).json({
             message: "Please select delivery address.",
             success: false
         })
     }
 
-    const customer = await Customer.findOne({_id: req.user.id});
-    const cart = await Cart.findOne({_id: customer.cart});
+    const customer = await Customer.findOne({ _id: req.user.id });
+    const cart = await Cart.findOne({ _id: customer.cart });
 
     // Create new order
     const order = new Order({
@@ -226,7 +203,7 @@ exports.cashOnDelivery = asyncHandler( async (req,res) => {
         orderStatus: "processing"
     });
     await order.save();
-            
+
     customer.orders.push(order._id);
     await customer.save();
 
@@ -236,20 +213,20 @@ exports.cashOnDelivery = asyncHandler( async (req,res) => {
 
 
     // send complaint registration email
-    try{
+    try {
         await mailSender(
-            customer.email , 
+            customer.email,
             "Order Placed",
             orderPlacedEmail(
                 customer.firstName,
                 deliveryAddress,
-                items,                    
+                items,
                 amount,
                 order.orderId
             )
         )
     }
-    catch(error){
+    catch (error) {
         throw Error(error);
     }
 
@@ -257,5 +234,5 @@ exports.cashOnDelivery = asyncHandler( async (req,res) => {
         message: "Order Placed Successfully",
         success: true
     })
-    
+
 })

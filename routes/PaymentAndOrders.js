@@ -1,5 +1,5 @@
 const express = require("express");
-const { processPayment, checkPaymentStatus, cashOnDelivery } = require("../controllers/Customer/Payment");
+const { processPayment, checkPaymentStatus, cashOnDelivery, createPaymentLink } = require("../controllers/Customer/Payment");
 const { createOrderAndPayment, fetchCustomerOrders } = require("../controllers/Customer/Order");
 const { isAuth, isCustomer } = require("../middlewares/auth");
 const router = express.Router();
@@ -19,6 +19,6 @@ router.route("/backend/fetch-orders").get(isAuth, isCustomer, fetchCustomerOrder
 
 router.route("/backend/order-cash-on-delivery").post(isAuth, isCustomer, cashOnDelivery );
 
-
+router.route("/backend/create-payment-link").post(isAuth, isCustomer, createPaymentLink);
 
 module.exports = router
